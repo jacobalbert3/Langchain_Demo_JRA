@@ -32,31 +32,46 @@ history = []
 
 
 async def run_graph_interactive():
-    # StateGraph expects state dict format, not just messages list
-    state = {"messages": []}
+    # Ask for customer_id before starting (optional - can be None to trigger user node)
+    customer_id_input = input('Enter your customer ID (or press Enter to be asked later): ').strip()
+    if customer_id_input:
+        try:
+            customer_id = int(customer_id_input)
+            print(f"Authenticated as customer ID: {customer_id}\n")
+        except ValueError:
+            print("Invalid customer ID, will ask for it later\n")
+            customer_id = None
+    else:
+        customer_id = None  # Will trigger user node to ask for it
+    
+    # Maintain conversation state (messages accumulate here)
+    accumulated_messages = []
     
     while True:
         user = input('User (q/Q to quit): ')
         if user in {'q', 'Q'}:
             break
         
-        # Add new message - pass as state dict
-        new_message = HumanMessage(content=user)
-        # StateGraph with add_messages reducer will merge messages
-        new_state = {"messages": [new_message]}
+        # Add user message to accumulated messages
+        accumulated_messages.append(HumanMessage(content=user))
         
-        # StateGraph expects state dict format: {"messages": [...]}
-        last_output = None
-        async for output in graph.astream(new_state):
+        # Build state with all accumulated messages and customer_id (may be None)
+        current_state = {"messages": accumulated_messages}
+        if customer_id is not None:
+            current_state["customer_id"] = customer_id
+        
+        # Stream graph execution and capture final state
+        final_state = None
+        async for output in graph.astream(current_state):
             if END in output or START in output:
                 continue
-            # stream() yields dictionaries with output keyed by node name
+            
+            # Print output from each node
             for key, value in output.items():
                 print(f"Output from node '{key}':")
                 print("---")
-                # value is state dict
+                # value is state dict - print latest messages
                 if isinstance(value, dict) and "messages" in value:
-                    # Print latest messages
                     latest_messages = value["messages"][-1:] if value["messages"] else []
                     for msg in latest_messages:
                         if hasattr(msg, 'content') and msg.content:
@@ -65,7 +80,19 @@ async def run_graph_interactive():
                             print(msg)
                 else:
                     print(value)
-                last_output = output
             print("\n---\n")
+            final_state = output  # Keep track of final output
+        
+        # Update accumulated messages and customer_id from final state (includes AI responses)
+        if final_state:
+            for value in final_state.values():
+                if isinstance(value, dict):
+                    if "messages" in value:
+                        accumulated_messages = value["messages"]
+                    # Update customer_id if it was set by user_node
+                    if "customer_id" in value and value["customer_id"] is not None:
+                        customer_id = value["customer_id"]
+                        print(f"✓ Customer ID set to: {customer_id}\n")
+                    break
     
 asyncio.run(run_graph_interactive())

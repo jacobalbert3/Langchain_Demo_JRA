@@ -7,6 +7,7 @@ from utils.database import db
 from langchain_core.messages import AIMessage
 from langgraph.graph import END
 import json
+import re
 from langgraph.prebuilt import ToolNode
 from functools import partial
 from langgraph.graph import StateGraph
@@ -90,14 +91,20 @@ def music_node(state: CustomState):
     return {"messages": [named_result]}
 
 def user_node(state: CustomState):
-    """User node: sets/updates customer_id in state. For now, hardcoded to 1."""
-    # TODO: Extract customer_id from user message, config, or authentication
-    customer_id = 1
+    """User node: extracts customer_id from messages or asks for it."""
+    customer_id = state.get("customer_id")
     
-    return {"customer_id": customer_id}
+    # If already set, keep it
+    if customer_id is not None:
+        return {"customer_id": customer_id}
+     
+    # No customer_id found - ask for it
+    from langchain_core.messages import AIMessage
+    ask_message = AIMessage(content="I need your customer ID to help you. Please provide your customer ID number if you would like information about your account.")
+    return {"messages": [ask_message], "customer_id": None}
 
 def router_node(state: CustomState):
-    """Router node: uses LLM to decide whether to go to Account or Inventory."""
+    """Router node: uses LLM to decide whether to go to Account, Inventory, or respond directly."""
     messages = state.get("messages", [])
     
     # Filter out any routing tool calls to avoid confusion
@@ -106,12 +113,26 @@ def router_node(state: CustomState):
     # Use general_support chain (router agent) to get routing decision
     result = chain.invoke(filtered_messages)
     
+    # If LLM responded directly (no tool call), treat as "other" and return response
+    if not _is_tool_call(result) and hasattr(result, 'content') and result.content:
+        return {"messages": [result], "router_choice": "other"}
+    
     # Extract the routing choice from tool calls
-    choice = "account"  # default
+    choice = "other"  # default to other for general queries
     if _is_tool_call(result):
         tool_calls = getattr(result, "tool_calls", [])
         if tool_calls:
-            choice = tool_calls[0].get("args", {}).get("choice", "account")
+            choice = tool_calls[0].get("args", {}).get("choice", "other")
+    
+    # If choice is "other" but we got a tool call, respond directly
+    if choice == "other":
+        # Re-invoke without tool to get a direct response
+        from agents.general_support import get_messages
+        from utils.model import model
+        from langchain_core.messages import SystemMessage
+        response_chain = get_messages | model  # Chain without tool binding
+        response = response_chain.invoke(filtered_messages)
+        return {"messages": [response], "router_choice": "other"}
     
     return {"router_choice": choice}
 
@@ -135,6 +156,7 @@ def inventory_node(state: CustomState):
     named_result = add_name(result, "inventory")
     return {"messages": [named_result]}
 
+
 def customer_node(state: CustomState):
     messages = state.get("messages", [])
     filtered = _filter_out_routes(messages)
@@ -145,14 +167,16 @@ def customer_node(state: CustomState):
 #saves and retrieves checkpoints (state) 
 memory = SqliteSaver.from_conn_string(":memory:") #external memory
 
-# Router conditionally routes to Account or Inventory based on router_choice
+# Router conditionally routes to Account, Inventory, or Other based on router_choice
 def route_from_router(state: CustomState):
     """Route based on router's choice."""
-    choice = state.get("router_choice", "account")
+    choice = state.get("router_choice", "other")
     if choice == "inventory":
         return "inventory"
-    else:
+    elif choice == "account":
         return "account"
+    else:
+        return "other"
 # Account and Inventory nodes can call tools or respond
 def route_from_account(state: CustomState):
     """Route from account node: if tool call, go to tools; otherwise END."""
@@ -172,24 +196,49 @@ def route_from_inventory(state: CustomState):
             return "tools"
     return END
 
+def route_from_user(state: CustomState):
+    """Route from user node: if customer_id set, go to router; otherwise END (wait for user)."""
+    customer_id = state.get("customer_id")
+    if customer_id is not None:
+        return "router"  # Customer ID found, proceed to router
+    else:
+        return END  # Asked for customer_id, wait for user's next message
 
+# Conditional entry point: check if customer_id is set
+def entry_route(state: CustomState):
+    """Entry point: if customer_id not set, go to user; otherwise go to router."""
+    customer_id = state.get("customer_id")
+    if customer_id is None:
+        return "user"  # Need to set customer_id first
+    else:
+        return "router"  # Already authenticated, go straight to router
 
 
 # Define Graph
 workflow = StateGraph(CustomState)
 workflow.add_node("user", user_node)
 workflow.add_node("router", router_node)
-workflow.set_entry_point("user")  # Start at user node
 workflow.add_node("account", account_node)
 workflow.add_node("inventory", inventory_node)
-workflow.add_edge("user", "router")  # User → Router
+
+# Set conditional entry point
+workflow.set_conditional_entry_point(entry_route, {
+    "user": "user",
+    "router": "router"
+})
+
+# User node routes: if customer_id set → router, otherwise → END (wait for user)
+workflow.add_conditional_edges("user", route_from_user, {
+    "router": "router",
+    END: END
+})
 workflow.add_node("account_tools", account_tools_node)
 workflow.add_node("inventory_tools", inventory_tools_node)
 
 workflow.add_conditional_edges("router", route_from_router, {
     "account": "account",
     "inventory": "inventory",
-    END: END
+    "other": END  # "other" means respond directly and end
 })
 
 workflow.add_conditional_edges("account", route_from_account, {
