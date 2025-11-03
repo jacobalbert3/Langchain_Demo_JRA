@@ -9,14 +9,21 @@ from langgraph.graph import END
 import json
 from langgraph.prebuilt import ToolNode
 from functools import partial
-from langgraph.graph import MessageGraph
+from langgraph.graph import StateGraph
 from langgraph.checkpoint.sqlite import SqliteSaver
 from agents.music_agent import song_recc_chain
-from agents.customer_agent import customer_chain, get_customer_info
+from agents.customer_agent import customer_chain, get_customer_info, edit_customer_info
 from agents.general_support import chain
 from agents.music_agent import get_albums_by_artist, get_tracks_by_artist, check_for_songs
+from langgraph.graph.message import AnyMessage, add_messages
+from typing import Annotated, Optional, TypedDict
 load_dotenv()
 
+
+class CustomState(TypedDict):
+    """Custom state with messages and additional variables"""
+    messages: Annotated[list[AnyMessage], add_messages]
+    customer_id: Optional[int]
 
 #why is this necessary?? -> creates one argument message (i.e ready for pipeline)
 def add_name(message, name):
@@ -33,17 +40,14 @@ def _get_last_ai_message(messages):
 
 
 
-# OLD
-# #checks if the message is a tool call
-# def _is_tool_call(msg):
-#     return hasattr(msg, "additional_kwargs") and 'tool_calls' in msg.additional_kwargs
-
-
 def _is_tool_call(msg):
     return hasattr(msg, "tool_calls") and len(msg.tool_calls) > 0
 
-#route determins where to go next
-def _route(messages):
+#route determines where to go next
+def _route(state: CustomState):
+    messages = state.get("messages", [])
+    if not messages:
+        return "general"
     last_message = messages[-1]
     if isinstance(last_message, AIMessage):
         #end the convo (i.e if no tool was called)
@@ -71,9 +75,16 @@ def _route(messages):
         return "general"
 
 
-#list of tools we can use
-tools = [get_albums_by_artist, get_tracks_by_artist, check_for_songs, get_customer_info]
-tools_node = ToolNode(tools)
+# List of tools we can use
+tools = [get_albums_by_artist, get_tracks_by_artist, check_for_songs, get_customer_info, edit_customer_info]
+tool_node_base = ToolNode(tools)
+
+# Wrap ToolNode to work with StateGraph - extract messages, return state update
+def tools_node(state: CustomState):
+    """Tools node that extracts messages from state, runs tools, returns state update"""
+    messages = state.get("messages", [])
+    result = tool_node_base.invoke(messages)
+    return {"messages": result}
 
 #input = running list of messages
 #including general can confuse the router, so we filter it out
@@ -86,27 +97,54 @@ def _filter_out_routes(messages):
         ms.append(m)
     return ms
 
-#NOTE** each node is RUNNABLE: -> pipeline of smaller steps (same as one function)
-general_node = _filter_out_routes | chain | partial(add_name, name="general")
-music_node = _filter_out_routes | song_recc_chain | partial(add_name, name="music")
-customer_node = _filter_out_routes | customer_chain | partial(add_name, name="customer")
+# Node functions for StateGraph - accept state, return state updates
+def general_node(state: CustomState):
+    messages = state.get("messages", [])
+    filtered = _filter_out_routes(messages)
+    result = chain.invoke(filtered)
+    named_result = add_name(result, "general")
+    return {"messages": [named_result]}
+
+def music_node(state: CustomState):
+    messages = state.get("messages", [])
+    filtered = _filter_out_routes(messages)
+    result = song_recc_chain.invoke(filtered)
+    named_result = add_name(result, "music")
+    return {"messages": [named_result]}
+
+def get_customer_id_node(state: CustomState):
+    """Get/set customer_id in state. For now, hardcoded to 1. Later will extract from messages/config."""
+    # TODO: Extract customer_id from user message, config, or authentication
+    customer_id = 1
+    
+    return {"customer_id": customer_id}
+
+def customer_node(state: CustomState):
+    messages = state.get("messages", [])
+    filtered = _filter_out_routes(messages)
+    result = customer_chain.invoke(filtered)
+    named_result = add_name(result, "customer")
+    return {"messages": [named_result]}
 
 #saves and retrieves checkpoints (state) 
-memory = SqliteSaver.from_conn_string(":memory:") #STORE IN RAM
+memory = SqliteSaver.from_conn_string(":memory:") #external memory
 
-#dictionary of ndoes and their names
-nodes = {"general": "general", "music": "music", END: END, "tools": "tools", "customer": "customer"}
-# Define a new graph
-workflow = MessageGraph()
+#dictionary of nodes and their names
+nodes = {"general": "general", "music": "music", END: END, "tools": "tools", "customer": "customer", "get_customer_id": "get_customer_id"}
+# Define a new graph with CustomState
+workflow = StateGraph(CustomState)
 workflow.add_node("general", general_node)
 workflow.add_node("music", music_node)
 workflow.add_node("customer", customer_node)
 workflow.add_node("tools", tools_node)
+workflow.add_node("get_customer_id", get_customer_id_node)
 #route returns a key for where to go next
 workflow.add_conditional_edges("general", _route, nodes)
 workflow.add_conditional_edges("tools", _route, nodes)
 workflow.add_conditional_edges("music", _route, nodes)
 workflow.add_conditional_edges("customer", _route, nodes)
+# Add edge from get_customer_id to customer node (so customer_id is set before customer operations)
+workflow.add_edge("get_customer_id", "customer")
 #?? why? TODO - so middle of convo can be saved and resumed??
 workflow.set_conditional_entry_point(_route, nodes)
 graph = workflow.compile()

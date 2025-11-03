@@ -32,20 +32,40 @@ history = []
 
 
 async def run_graph_interactive():
+    # StateGraph expects state dict format, not just messages list
+    state = {"messages": []}
+    
     while True:
         user = input('User (q/Q to quit): ')
         if user in {'q', 'Q'}:
             break
-        history.append(HumanMessage(content=user))
-        async for output in graph.astream(history):
+        
+        # Add new message - pass as state dict
+        new_message = HumanMessage(content=user)
+        # StateGraph with add_messages reducer will merge messages
+        new_state = {"messages": [new_message]}
+        
+        # StateGraph expects state dict format: {"messages": [...]}
+        last_output = None
+        async for output in graph.astream(new_state):
             if END in output or START in output:
                 continue
             # stream() yields dictionaries with output keyed by node name
             for key, value in output.items():
                 print(f"Output from node '{key}':")
                 print("---")
-                print(value)
+                # value is state dict
+                if isinstance(value, dict) and "messages" in value:
+                    # Print latest messages
+                    latest_messages = value["messages"][-1:] if value["messages"] else []
+                    for msg in latest_messages:
+                        if hasattr(msg, 'content') and msg.content:
+                            print(msg.content)
+                        else:
+                            print(msg)
+                else:
+                    print(value)
+                last_output = output
             print("\n---\n")
-        history.append(AIMessage(content=value.content))
     
 asyncio.run(run_graph_interactive())
