@@ -1,20 +1,21 @@
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from pydantic import BaseModel, Field
 from utils.database import db
-from langchain_core.messages import AIMessage
 from langgraph.graph import END
 import json
 import re
-from langgraph.prebuilt import ToolNode
+from langgraph.prebuilt import ToolNode, tools_condition
+from utils.fallback import create_tool_node_with_fallback
 from functools import partial
 from langgraph.graph import StateGraph
 from langgraph.checkpoint.sqlite import SqliteSaver
 from agents.music_agent import song_recc_chain, get_albums_by_artist, get_tracks_by_artist, check_for_songs
 from agents.customer_agent import customer_chain, get_customer_info, edit_customer_info
 from agents.general_support import chain
+from utils.assistant import Assistant
 from langgraph.graph.message import AnyMessage, add_messages
 from typing import Annotated, Optional, TypedDict
 load_dotenv()
@@ -45,23 +46,33 @@ def _is_tool_call(msg):
 
 # Separate tools for each agent
 account_tools = [get_customer_info, edit_customer_info]
-account_tool_node_base = ToolNode(account_tools)
+# Use fallback wrapper to handle tool errors gracefully
+account_tool_node_base = create_tool_node_with_fallback(account_tools)
 inventory_tools = [get_albums_by_artist, get_tracks_by_artist, check_for_songs]
-inventory_tool_node_base = ToolNode(inventory_tools)
+# Use fallback wrapper to handle tool errors gracefully
+inventory_tool_node_base = create_tool_node_with_fallback(inventory_tools)
 
 # Account tools node - only customer tools available
 def account_tools_node(state: CustomState):
     """Tools node for account agent - only customer tools available"""
     messages = state.get("messages", [])
-    result = account_tool_node_base.invoke(messages)
-    return {"messages": result}
+    result = account_tool_node_base.invoke({"messages": messages})
+    # ToolNode returns dict with "messages" key when given dict input
+    if isinstance(result, dict) and "messages" in result:
+        return {"messages": result["messages"]}
+    # Fallback: if result is already a list (shouldn't happen but safe)
+    return {"messages": result if isinstance(result, list) else [result]}
 
 # Inventory tools node - only music tools available
 def inventory_tools_node(state: CustomState):
     """Tools node for inventory agent - only music tools available"""
     messages = state.get("messages", [])
-    result = inventory_tool_node_base.invoke(messages)
-    return {"messages": result}
+    result = inventory_tool_node_base.invoke({"messages": messages})
+    # ToolNode returns dict with "messages" key when given dict input
+    if isinstance(result, dict) and "messages" in result:
+        return {"messages": result["messages"]}
+    # Fallback: if result is already a list (shouldn't happen but safe)
+    return {"messages": result if isinstance(result, list) else [result]}
 
 # Filter out routing tool calls to avoid confusion
 def _filter_out_routes(messages):
@@ -110,8 +121,8 @@ def router_node(state: CustomState):
     # Filter out any routing tool calls to avoid confusion
     filtered_messages = [m for m in messages if not (_is_tool_call(m) and getattr(m, "name", None) == "router")]
     
-    # Use general_support chain (router agent) to get routing decision
-    result = chain.invoke(filtered_messages)
+    # Use Assistant-wrapped chain to ensure non-empty responses
+    result = router_assistant.invoke(filtered_messages)
     
     # If LLM responded directly (no tool call), treat as "other" and return response
     if not _is_tool_call(result) and hasattr(result, 'content') and result.content:
@@ -131,7 +142,9 @@ def router_node(state: CustomState):
         from utils.model import model
         from langchain_core.messages import SystemMessage
         response_chain = get_messages | model  # Chain without tool binding
-        response = response_chain.invoke(filtered_messages)
+        # Use Assistant to ensure non-empty response
+        other_assistant = Assistant(response_chain)
+        response = other_assistant.invoke(filtered_messages)
         return {"messages": [response], "router_choice": "other"}
     
     return {"router_choice": choice}
@@ -141,8 +154,8 @@ def account_node(state: CustomState):
     messages = state.get("messages", [])
     # Filter out routing tool calls
     filtered = _filter_out_routes(messages)
-    # Use customer agent chain
-    result = customer_chain.invoke(filtered)
+    # Use Assistant-wrapped chain to ensure non-empty responses
+    result = account_assistant.invoke(filtered)
     named_result = add_name(result, "account")
     return {"messages": [named_result]}
 
@@ -151,8 +164,8 @@ def inventory_node(state: CustomState):
     messages = state.get("messages", [])
     # Filter out routing tool calls
     filtered = _filter_out_routes(messages)
-    # Use music agent chain
-    result = song_recc_chain.invoke(filtered)
+    # Use Assistant-wrapped chain to ensure non-empty responses
+    result = inventory_assistant.invoke(filtered)
     named_result = add_name(result, "inventory")
     return {"messages": [named_result]}
 
@@ -177,24 +190,10 @@ def route_from_router(state: CustomState):
         return "account"
     else:
         return "other"
-# Account and Inventory nodes can call tools or respond
-def route_from_account(state: CustomState):
-    """Route from account node: if tool call, go to tools; otherwise END."""
-    messages = state.get("messages", [])
-    if messages:
-        last_message = messages[-1]
-        if isinstance(last_message, AIMessage) and _is_tool_call(last_message):
-            return "tools"
-    return END
-
-def route_from_inventory(state: CustomState):
-    """Route from inventory node: if tool call, go to tools; otherwise END."""
-    messages = state.get("messages", [])
-    if messages:
-        last_message = messages[-1]
-        if isinstance(last_message, AIMessage) and _is_tool_call(last_message):
-            return "tools"
-    return END
+# Note: Using LangGraph's prebuilt tools_condition instead of custom routing functions
+# tools_condition automatically checks if the last AI message has tool_calls
+# Returns "tools" if tool calls exist, "__end__" if not
+# It works with StateGraph by checking state["messages"]
 
 def route_from_user(state: CustomState):
     """Route from user node: if customer_id set, go to router; otherwise END (wait for user)."""
@@ -213,6 +212,12 @@ def entry_route(state: CustomState):
     else:
         return "router"  # Already authenticated, go straight to router
 
+
+
+# Wrap chains with Assistant for reliable responses (handles empty responses)
+router_assistant = Assistant(chain)
+account_assistant = Assistant(customer_chain)
+inventory_assistant = Assistant(song_recc_chain)
 
 # Define Graph
 workflow = StateGraph(CustomState)
@@ -241,14 +246,14 @@ workflow.add_conditional_edges("router", route_from_router, {
     "other": END  # "other" means respond directly and end
 })
 
-workflow.add_conditional_edges("account", route_from_account, {
+workflow.add_conditional_edges("account", tools_condition, {
     "tools": "account_tools",
-    END: END
+    "__end__": END
 })
 
-workflow.add_conditional_edges("inventory", route_from_inventory, {
+workflow.add_conditional_edges("inventory", tools_condition, {
     "tools": "inventory_tools",
-    END: END
+    "__end__": END
 })
 workflow.add_edge("account_tools", "account")
 workflow.add_edge("inventory_tools", "inventory")

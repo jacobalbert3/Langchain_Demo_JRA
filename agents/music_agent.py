@@ -4,16 +4,22 @@ from utils.database import db
 from utils.model import model
 
 #PART 2 - DEFINITION FOR MUSIC AGENT
+
+def _escape_sql_string(value: str) -> str:
+    """Escape single quotes in SQL strings by doubling them."""
+    return value.replace("'", "''")
+
 #TOOL: Get albums by artist
 @tool
 def get_albums_by_artist(artist: str):
     """Get albums by an artist."""
+    escaped_artist = _escape_sql_string(artist)
     return db.run(
         f"""
         SELECT Album.Title, Artist.Name 
         FROM Album 
         JOIN Artist ON Album.ArtistId = Artist.ArtistId 
-        WHERE Artist.Name LIKE '%{artist}%';
+        WHERE Artist.Name LIKE '%{escaped_artist}%';
         """,
         include_columns=True
     )
@@ -23,13 +29,14 @@ def get_albums_by_artist(artist: str):
 @tool
 def get_tracks_by_artist(artist: str):
     """Get songs by an artist (or similar artists)."""
+    escaped_artist = _escape_sql_string(artist)
     return db.run(
         f"""
         SELECT Track.Name as SongName, Artist.Name as ArtistName 
         FROM Album 
         LEFT JOIN Artist ON Album.ArtistId = Artist.ArtistId 
         LEFT JOIN Track ON Track.AlbumId = Album.AlbumId 
-        WHERE Artist.Name LIKE '%{artist}%';
+        WHERE Artist.Name LIKE '%{escaped_artist}%';
         """,
         include_columns=True
     )
@@ -38,9 +45,10 @@ def get_tracks_by_artist(artist: str):
 @tool
 def check_for_songs(song_title):
     """Check if a song exists by its name."""
+    escaped_title = _escape_sql_string(song_title)
     return db.run(
         f"""
-        SELECT * FROM Track WHERE Name LIKE '%{song_title}%';
+        SELECT * FROM Track WHERE Name LIKE '%{escaped_title}%';
         """,
         include_columns=True
     )
