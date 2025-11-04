@@ -1,6 +1,7 @@
 
 
 from dotenv import load_dotenv
+import os
 from typing import Annotated, Optional
 try:
     from typing_extensions import TypedDict
@@ -12,27 +13,30 @@ from langgraph.graph.message import AnyMessage, add_messages
 from langchain_openai import ChatOpenAI
 from langchain.agents import create_agent
 from agents.router_agent import router_system_prompt
-from agents.music_agent import get_albums_by_artist, get_tracks_by_artist, check_for_songs, music_system_prompt
+from agents.music_agent import get_albums_by_artist, get_tracks_by_artist, music_system_prompt, get_info_about_track
 from agents.customer_agent import get_customer_info, edit_customer_info, customer_system_prompt
 from agents.general_support import general_support_system_prompt
 from utils.contexts import UserContext
 from utils.model import model
 from pydantic import BaseModel
 from typing import Literal
-
 from langchain.agents.middleware import wrap_tool_call
 from langchain_core.messages import ToolMessage
+from langchain_core.runnables import RunnableConfig
+from langsmith import Client
+from langsmith.utils import LangSmithConflictError
+from langchain_core.prompts import ChatPromptTemplate
+
 
 load_dotenv()
+
+ls_client = Client(api_key=os.getenv("LANGCHAIN_API_KEY"))
 
 class CustomState(TypedDict):
     """Custom state"""
     messages: Annotated[list[AnyMessage], add_messages]
     customer_id: Optional[int] #TODO: remove:
     router_choice: Optional[str]  # "account"/ "inventory"
-
-
-
 
 
 #handle tool errors w/ custom message
@@ -66,6 +70,7 @@ def _last_ai(state: CustomState) -> AIMessage | None:
 class NextRoute(BaseModel):
     choice: Literal["account", "inventory", "other"]
 
+
 router_agent = create_agent(model, tools=[], system_prompt=router_system_prompt, response_format=NextRoute)
 
 # Account agent (non-sensitive tools)
@@ -80,7 +85,7 @@ account_agent = create_agent(
 # Inventory agent
 inventory_agent = create_agent(
     model,
-    tools=[get_albums_by_artist, get_tracks_by_artist, check_for_songs],
+    tools=[get_albums_by_artist, get_tracks_by_artist, get_info_about_track],
     context_schema=UserContext,
     system_prompt=music_system_prompt,
     middleware=[handle_tool_errors],
@@ -117,8 +122,10 @@ def user_node(state: CustomState):
     }
 
 def router_node(state: CustomState):
+    
     # 1) Call the router agent with the conversation so far
-    out = router_agent.invoke({"messages": state["messages"]})
+    config = RunnableConfig(tags=["router"], metadata={"customer_id_routed": state.get("customer_id")})
+    out = router_agent.invoke({"messages": state["messages"]}, config=config)
 
     # 2) Get the structured decision safely
     sr = out.get("structured_response")

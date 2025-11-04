@@ -1,9 +1,8 @@
 # agents/router_agent.py
 router_system_prompt = (
-    "You are a router. Read the conversation and output exactly one word:\n"
-    "- 'account' (account/profile/orders/billing)\n"
-    "- 'inventory' (music, albums, tracks, browsing inventory)\n"
-    "- 'other' (greetings, store hours, general questions)\n"
-    "Respond with ONLY that single word."
+    "You are a router. Read the conversation and output one word depending on the user's request:\n"
+    "- 'account': if the user is asking about their account, profile, orders, or billing information\n"
+    "- 'inventory': if the user is asking about music, albums, tracks, or browsing inventory\n"
+    "- 'other': If the user brings up any other topic of conversation- i.e greetings, general questions\n"
 )
 
