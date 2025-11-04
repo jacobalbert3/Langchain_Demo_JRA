@@ -2,12 +2,12 @@
 from langchain.tools import tool, ToolRuntime
 from utils.database import db
 from utils.contexts import UserContext
-
+from typing import Literal
 editable_parameters = ["name", "email", "phone"]
 
 @tool
-def edit_customer_info(runtime: ToolRuntime[UserContext], parameter: str, value: str) -> str:
-    """Update a customer's information"""
+def edit_customer_info(runtime: ToolRuntime[UserContext], parameter: Literal["name", "email", "phone"], value: str) -> str:
+    """Update a customer's information - parameter must be one of: name, email, phone"""
     
     if parameter not in editable_parameters:
         return f"The {parameter} parameter is not editable"

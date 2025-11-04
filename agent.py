@@ -24,11 +24,10 @@ from langchain.agents.middleware import wrap_tool_call
 from langchain_core.messages import ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langsmith import Client
-from langsmith.utils import LangSmithConflictError
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import RemoveMessage
+from langgraph.checkpoint.sqlite import SqliteSaver
 
-
+memory = SqliteSaver.from_conn_string(":memory:")
 load_dotenv()
 
 ls_client = Client(api_key=os.getenv("LANGCHAIN_API_KEY"))
@@ -70,17 +69,30 @@ def _last_ai(state: CustomState) -> AIMessage | None:
 
 
 class NextRoute(BaseModel):
-    choice: Literal["account", "inventory", "other"]
+    choice: Literal["account", "account_sensitive", "inventory", "other"]
 
 
 router_agent = create_agent(model, tools=[], system_prompt=router_system_prompt, response_format=NextRoute)
 
-# Account agent (non-sensitive tools)
+# Account agent (non-sensitive tools - read-only)
 account_agent = create_agent(
     model,
     tools=[get_customer_info],
     context_schema=UserContext,
     system_prompt=customer_system_prompt,
+    middleware=[handle_tool_errors],
+)
+
+# Account sensitive agent (has edit capabilities)
+account_sensitive_agent = create_agent(
+    model,
+    tools=[get_customer_info, edit_customer_info],
+    context_schema=UserContext,
+    system_prompt=(
+        "You help users view and update their profile information. "
+        "Use get_customer_info() to show current info. "
+        "Use edit_customer_info(parameter, value) to update name, email, or phone when the user requests changes."
+    ),
     middleware=[handle_tool_errors],
 )
 
@@ -102,17 +114,6 @@ general_agent = create_agent(
     middleware=[handle_tool_errors],
 )
 
-# Edit agent (sensitive tool) — only after approval
-edit_agent = create_agent(
-    model,
-    tools=[edit_customer_info],
-    context_schema=UserContext,
-    system_prompt=(
-        "You may update customer info ONLY after explicit user approval. "
-        "Use edit_customer_info(parameter, value) to change name/email/phone."
-    ),
-    middleware=[handle_tool_errors],
-)
 
 #========NODES========
 def user_node(state: CustomState):
@@ -143,7 +144,7 @@ def router_node(state: CustomState):
     choice = sr.get("choice")
 
     # 5) Validate the value to keep your state clean
-    if choice not in {"account", "inventory", "other"}:
+    if choice not in {"account", "account_sensitive", "inventory", "other"}:
         raise ValueError(f"Invalid choice: {choice!r}")
 
     # 6) Return a state patch that your graph expects
@@ -155,6 +156,14 @@ def account_node(state: CustomState):
     final_ai = _final_ai(out)
     if final_ai is None:
         raise RuntimeError("Account agent did not return a final AI message")
+    return {"messages": [final_ai]}
+
+def account_sensitive_node(state: CustomState):
+    ctx = UserContext(customer_id=state.get("customer_id"))
+    out = account_sensitive_agent.invoke({"messages": state["messages"]}, context=ctx)
+    final_ai = _final_ai(out)
+    if final_ai is None:
+        raise RuntimeError("Account sensitive agent did not return a final AI message")
     return {"messages": [final_ai]}
 
 def inventory_node(state: CustomState):
@@ -176,37 +185,6 @@ def general_node(state: CustomState):
     return {"messages": [final_ai]}
 
 
-def detect_edit_intent(state: CustomState) -> str:
-    # naive text heuristic — OK to tighten later
-    ai = _last_ai(state)
-    text = (ai.content or "").lower() if ai else ""
-    if any(k in text for k in ["update my", "change my", "edit my", "modify my"]):
-        return "approval_request"
-    return "should_summarize"
-
-def approval_request_node(state: CustomState):
-    msg = AIMessage(
-        content=("⚠️ Confirm updating your profile. Reply 'yes' to proceed or 'no' to cancel. "
-                 "If proceeding, specify the change, e.g., `change my email to alex@example.com`.")
-    )
-    return {"messages": [msg]}
-
-def human_approval_node(state: CustomState):
-    last_human = next((m for m in reversed(state["messages"]) if isinstance(m, HumanMessage)), None)
-    if not last_human:
-        return {"messages": [AIMessage(content="Please reply 'yes' or 'no'.")]}
-    t = last_human.content.strip().lower()
-    if t in {"no", "n", "cancel"}:
-        return {"messages": [AIMessage(content="Update cancelled. No changes made.")]}
-    if t not in {"yes", "y", "confirm", "proceed"}:
-        return {"messages": [AIMessage(content="Please reply 'yes' or 'no'.")]}
-    # approved → run the sensitive tool through the edit agent
-    ctx = UserContext(customer_id=state.get("customer_id"))
-    out = edit_agent.invoke({"messages": state["messages"]}, context=ctx)
-    final_ai = _final_ai(out)
-    if final_ai is None:
-        raise RuntimeError("Edit agent did not return a final AI message")
-    return {"messages": [final_ai]}
 
 def should_summarize_node(state: CustomState):
     '''Passthrough node - routing decision handled by should_summarize_route'''
@@ -260,23 +238,28 @@ workflow = StateGraph(CustomState)
 workflow.add_node("user", user_node)
 workflow.add_node("router", router_node)
 workflow.add_node("account", account_node)
+workflow.add_node("account_sensitive", account_sensitive_node)
 workflow.add_node("inventory", inventory_node)
 workflow.add_node("general", general_node)
-workflow.add_node("approval_request", approval_request_node)
-workflow.add_node("human_approval", human_approval_node)
 workflow.add_node("summarize", summarize)
 workflow.add_node("should_summarize", should_summarize_node)
 
 workflow.set_conditional_entry_point(entry_route, {"user": "user", "router": "router"})
 workflow.add_conditional_edges("user", route_from_user, {"router": "router"})
-workflow.add_conditional_edges("router", route_from_router, {"account": "account", "inventory": "inventory", "other": "general"})
+workflow.add_conditional_edges("router", route_from_router, {
+    "account": "account", 
+    "account_sensitive": "account_sensitive", 
+    "inventory": "inventory", 
+    "other": "general"
+})
 workflow.add_edge("general", "should_summarize")
-workflow.add_conditional_edges("should_summarize", should_summarize_route, {"summarize": "summarize", END: END})
-workflow.add_conditional_edges("account", detect_edit_intent, {"approval_request": "approval_request", "should_summarize": "should_summarize"})
-workflow.add_edge("approval_request", "human_approval")
-workflow.add_edge("human_approval", "account")
-workflow.add_edge("summarize", END)
+workflow.add_edge("account", "should_summarize")
+workflow.add_edge("account_sensitive", "should_summarize")
 workflow.add_edge("inventory", "should_summarize")
+workflow.add_conditional_edges("should_summarize", should_summarize_route, {"summarize": "summarize", END: END})
+workflow.add_edge("summarize", END)
 
 graph = workflow.compile(
+    checkpointer=memory,
+    interrupt_before=["account_sensitive"],
 )
