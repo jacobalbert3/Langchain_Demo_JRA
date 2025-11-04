@@ -26,6 +26,7 @@ from langchain_core.runnables import RunnableConfig
 from langsmith import Client
 from langsmith.utils import LangSmithConflictError
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import RemoveMessage
 
 
 load_dotenv()
@@ -36,7 +37,8 @@ class CustomState(TypedDict):
     """Custom state"""
     messages: Annotated[list[AnyMessage], add_messages]
     customer_id: Optional[int] #TODO: remove:
-    router_choice: Optional[str]  # "account"/ "inventory"
+    router_choice: Optional[str]
+    summary: str  # "account"/ "inventory"
 
 
 #handle tool errors w/ custom message
@@ -180,7 +182,7 @@ def detect_edit_intent(state: CustomState) -> str:
     text = (ai.content or "").lower() if ai else ""
     if any(k in text for k in ["update my", "change my", "edit my", "modify my"]):
         return "approval_request"
-    return "__end__"
+    return "should_summarize"
 
 def approval_request_node(state: CustomState):
     msg = AIMessage(
@@ -206,6 +208,43 @@ def human_approval_node(state: CustomState):
         raise RuntimeError("Edit agent did not return a final AI message")
     return {"messages": [final_ai]}
 
+def should_summarize_node(state: CustomState):
+    '''Passthrough node - routing decision handled by should_summarize_route'''
+    # Ensure the last AI message is in the output when routing to END
+    # This ensures the response is displayed even when the graph ends here
+    last_ai = _last_ai(state)
+    if last_ai:
+        # Return the last AI message to ensure it's in the final output
+        return {"messages": [last_ai]}
+    return {}
+
+def should_summarize_route(state: CustomState):
+    '''Routing function for should_summarize node'''
+    messages = state["messages"]
+    if len(messages) > 7:
+        return "summarize"
+    return END
+
+def summarize(state: CustomState):
+    summary = state.get("summary", "")
+    if summary:
+        sum_message = f"Here is the summary of the conversation so far: {summary} \n\n Please continue the summary including the new information."
+    else:
+        sum_message = "Create a summary of the conversation so far."
+    messages = state["messages"] + [HumanMessage(content=sum_message)]
+    response = model.invoke(messages)
+    
+    # Get the last AI message (the final response from the agent before summarize)
+    # This is the message we want to display, not the summary
+    last_ai = _last_ai(state)
+    
+    # Remove all old messages except keep the last 2 (last human + last AI message)
+    # The summary is stored in state but not added as a message, so it won't be displayed
+    del_messages = [RemoveMessage(id=m.id) for m in state["messages"][:-2]]
+    
+    # Return the summary (stored in state for future summaries) and remove old messages
+    # The last AI message will remain since we're only removing messages[:-2]
+    return {"summary": response.content, "messages": del_messages}
 # ---------- Routing helpers ----------
 def entry_route(state: CustomState):
     return "user" if state.get("customer_id") is None else "router"
@@ -225,14 +264,19 @@ workflow.add_node("inventory", inventory_node)
 workflow.add_node("general", general_node)
 workflow.add_node("approval_request", approval_request_node)
 workflow.add_node("human_approval", human_approval_node)
+workflow.add_node("summarize", summarize)
+workflow.add_node("should_summarize", should_summarize_node)
 
 workflow.set_conditional_entry_point(entry_route, {"user": "user", "router": "router"})
-workflow.add_conditional_edges("user", route_from_user, {"router": "router", END: END})
+workflow.add_conditional_edges("user", route_from_user, {"router": "router"})
 workflow.add_conditional_edges("router", route_from_router, {"account": "account", "inventory": "inventory", "other": "general"})
-workflow.add_edge("general", END)
-workflow.add_conditional_edges("account", detect_edit_intent, {"approval_request": "approval_request", "__end__": END})
+workflow.add_edge("general", "should_summarize")
+workflow.add_conditional_edges("should_summarize", should_summarize_route, {"summarize": "summarize", END: END})
+workflow.add_conditional_edges("account", detect_edit_intent, {"approval_request": "approval_request", "should_summarize": "should_summarize"})
 workflow.add_edge("approval_request", "human_approval")
 workflow.add_edge("human_approval", "account")
+workflow.add_edge("summarize", END)
+workflow.add_edge("inventory", "should_summarize")
 
 graph = workflow.compile(
 )
