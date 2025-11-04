@@ -56,12 +56,17 @@ async def run_graph_interactive():
         accumulated_messages.append(HumanMessage(content=user))
         
         # Build state with all accumulated messages and customer_id (may be None)
+        # NOTE: For Studio, state persists automatically. For local testing without checkpointer,
+        # we pass state directly without config
         current_state = {"messages": accumulated_messages}
         if customer_id is not None:
             current_state["customer_id"] = customer_id
         
         # Stream graph execution and capture final state
         final_state = None
+        
+        # Without checkpointer, interrupts won't work in local testing
+        # Studio handles interrupts automatically
         async for output in graph.astream(current_state):
             if END in output or START in output:
                 continue
@@ -82,6 +87,10 @@ async def run_graph_interactive():
                     print(value)
             print("\n---\n")
             final_state = output  # Keep track of final output
+        
+        # NOTE: Interrupts require a checkpointer. For local testing without Studio,
+        # interrupts won't work. Studio handles interrupts automatically with its built-in checkpointer.
+        # If you need interrupts in local testing, uncomment the memory checkpointer in agent.py
         
         # Update accumulated messages and customer_id from final state (includes AI responses)
         if final_state:
