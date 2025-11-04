@@ -8,6 +8,7 @@ editable_parameters = ["name", "email", "phone"]
 @tool
 def edit_customer_info(runtime: ToolRuntime[UserContext], parameter: str, value: str) -> str:
     """Update a customer's information"""
+    
     if parameter not in editable_parameters:
         return f"The {parameter} parameter is not editable"
 
@@ -36,6 +37,7 @@ def edit_customer_info(runtime: ToolRuntime[UserContext], parameter: str, value:
 @tool
 def get_customer_info(runtime: ToolRuntime[UserContext]):
     """Look up customer info (customer_id comes from context)."""
+
     customer_id = runtime.context.customer_id
     if not customer_id:
         raise ValueError("Customer ID not found in context")

@@ -20,6 +20,9 @@ from utils.model import model
 from pydantic import BaseModel
 from typing import Literal
 
+from langchain.agents.middleware import wrap_tool_call
+from langchain_core.messages import ToolMessage
+
 load_dotenv()
 
 class CustomState(TypedDict):
@@ -27,6 +30,24 @@ class CustomState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
     customer_id: Optional[int] #TODO: remove:
     router_choice: Optional[str]  # "account"/ "inventory"
+
+
+
+
+
+#handle tool errors w/ custom message
+@wrap_tool_call
+def handle_tool_errors(request, handler):
+    try:
+        return handler(request)
+    except Exception as e:
+        return ToolMessage(
+            content=f"Tool error!!({str(e)})",
+            tool_call_id=request.tool_call["id"]
+        )
+
+
+
 
 #========AGENTS========
 
@@ -53,6 +74,7 @@ account_agent = create_agent(
     tools=[get_customer_info],
     context_schema=UserContext,
     system_prompt=customer_system_prompt,
+    middleware=[handle_tool_errors],
 )
 
 # Inventory agent
@@ -61,6 +83,7 @@ inventory_agent = create_agent(
     tools=[get_albums_by_artist, get_tracks_by_artist, check_for_songs],
     context_schema=UserContext,
     system_prompt=music_system_prompt,
+    middleware=[handle_tool_errors],
 )
 
 # General support agent
@@ -69,6 +92,7 @@ general_agent = create_agent(
     tools=[],
     context_schema=UserContext,
     system_prompt=general_support_system_prompt,
+    middleware=[handle_tool_errors],
 )
 
 # Edit agent (sensitive tool) — only after approval
@@ -80,6 +104,7 @@ edit_agent = create_agent(
         "You may update customer info ONLY after explicit user approval. "
         "Use edit_customer_info(parameter, value) to change name/email/phone."
     ),
+    middleware=[handle_tool_errors],
 )
 
 #========NODES========
@@ -202,4 +227,5 @@ workflow.add_conditional_edges("account", detect_edit_intent, {"approval_request
 workflow.add_edge("approval_request", "human_approval")
 workflow.add_edge("human_approval", "account")
 
-graph = workflow.compile()
+graph = workflow.compile(
+)
