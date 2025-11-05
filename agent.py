@@ -220,7 +220,7 @@ def should_summarize_node(state: CustomState):
 def should_summarize_route(state: CustomState):
     '''Routing function for should_summarize node'''
     messages = state["messages"]
-    if len(messages) > 7:
+    if len(messages) > 4:
         return "summarize"
     return END
 
