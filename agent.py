@@ -2,6 +2,7 @@
 
 from dotenv import load_dotenv
 import os
+import json
 from typing import Annotated, Optional
 try:
     from typing_extensions import TypedDict
@@ -18,6 +19,7 @@ from agents.customer_agent import get_customer_info, edit_customer_info, custome
 from agents.general_support import general_support_system_prompt
 from utils.contexts import AccountState, InventoryState, GeneralState
 from utils.model import model
+from utils.prompt_injection import prompt_injection_guard
 from pydantic import BaseModel
 from typing import Literal
 from langchain.agents.middleware import wrap_tool_call
@@ -54,6 +56,8 @@ HumanInTheLoopMiddleware.after_model = _patched_after_model
 
 
 
+#--------STATE DEFINITIONS---------------
+
 class CustomState(TypedDict):
     """Custom state"""
     messages: Annotated[list[AnyMessage], add_messages] #reducer to add messages to state
@@ -67,7 +71,6 @@ class SupervisorState(AgentState):
     username: Optional[str]
     summary: str | None = None
     router_choice: Literal["account", "inventory", "general"] | None = None
-
 #handle tool error so it doesn't break the workflow
 @wrap_tool_call
 def handle_tool_errors(request, handler):
@@ -185,6 +188,7 @@ supervisor = create_agent(
     model,
     tools=[call_account_agent_tool, call_inventory_agent_tool, call_general_agent_tool],           # start with ONLY account tool
     system_prompt=router_system_prompt,
+    middleware=[prompt_injection_guard],
     state_schema=SupervisorState,
 )
 
