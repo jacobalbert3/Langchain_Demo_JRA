@@ -34,7 +34,7 @@ def edit_customer_info(runtime: ToolRuntime[None, AccountState], parameter: Lite
 
     return "Customer info updated"
 
-@tool
+@tool(description="Look up customer information (any information is safe to show the user). Returns all customer fields including FirstName, LastName, Phone, Email, Address, City, State, Country, PostalCode, Company, Fax, etc.")
 def get_customer_info(runtime: ToolRuntime[None, AccountState]):
     """Look up customer info (customer_id comes from context)."""
 
@@ -61,6 +61,8 @@ def get_customer_info(runtime: ToolRuntime[None, AccountState]):
 
 customer_system_prompt = """You help a user view/update their profile.
 
-- Use get_customer_info (no params) to show current info.
-- Use edit_customer_info(parameter, value) to update.
-If the request is outside those, explain limits politely."""
+- Use get_customer_info (no params) to show current info. This returns ALL customer information.
+- When user asks for specific information (like "name", "phone number", "email", etc.), extract that field from the returned data and present it clearly.
+- Users can ask for ANY customer information - extract and show the requested field(s) from the full dataset.
+- Use edit_customer_info(parameter, value) to update. Only Address, Phone, and Email can be edited.
+- If the request is outside those limits, explain limits politely."""
