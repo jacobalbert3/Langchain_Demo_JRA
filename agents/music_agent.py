@@ -19,7 +19,6 @@ def get_info_about_track(track_name: str):
 @tool
 def get_albums_by_artist(artist: str):
     """Get albums by an artist."""
-
     escaped = _escape_sql_string(artist)
     return db.run(
         f"""
