@@ -37,8 +37,6 @@ load_dotenv()
 memory = SqliteSaver.from_conn_string(":memory:")
 
 
-
-
 ls_client = Client(api_key=os.getenv("LANGCHAIN_API_KEY"))
 
 _old_after_model = HumanInTheLoopMiddleware.after_model
@@ -84,7 +82,7 @@ def handle_tool_errors(request, handler):
 def supervisor_node(state: CustomState):
     customer_id = state.get("customer_id")
     if not customer_id:
-        return {"messages": [HumanMessage(content="Please provide your customer ID to continue.")]}
+        return {"messages": [AIMessage(content="Please provide your customer ID to continue.")]}
     out = supervisor.invoke({
         "messages": state["messages"],
         "customer_id": customer_id,
@@ -208,12 +206,8 @@ def _last_ai(state: CustomState) -> AIMessage | None:
     return None
 
 
-
-
 def should_summarize_node(state: CustomState):
     '''Passthrough node - routing decision handled by should_summarize_route'''
-    # Ensure the last AI message is in the output when routing to END
-    # This ensures the response is displayed even when the graph ends here
     last_ai = _last_ai(state)
     if last_ai:
         # Return the last AI message to ensure it's in the final output
