@@ -26,22 +26,40 @@ from langchain_core.runnables import RunnableConfig
 from langsmith import Client
 from langchain_core.messages import RemoveMessage
 from langgraph.checkpoint.sqlite import SqliteSaver
-from langchain.agents.middleware import PIIMiddleware, ToolRetryMiddleware, before_agent
+from langchain.agents.middleware import PIIMiddleware, ToolRetryMiddleware, before_agent, HumanInTheLoopMiddleware
 from langgraph.graph import START
 from langchain.agents import AgentState
 from langchain.tools import tool, ToolRuntime, InjectedToolCallId
 from langgraph.types import Command
 load_dotenv()
 
+#memory for checkpointer (if not showing through studio)
 memory = SqliteSaver.from_conn_string(":memory:")
+
+
+
 
 ls_client = Client(api_key=os.getenv("LANGCHAIN_API_KEY"))
 
-#STATE for the whole graph workflow
+_old_after_model = HumanInTheLoopMiddleware.after_model
+
+def _patched_after_model(self, hitl_response, runtime, **kwargs):
+    """Allow HITL response to be a raw JSON string (Studio bug workaround)."""
+    if isinstance(hitl_response, str):
+        try:
+            hitl_response = json.loads(hitl_response)
+        except Exception:
+            pass
+    return _old_after_model(self, hitl_response, runtime, **kwargs)
+
+HumanInTheLoopMiddleware.after_model = _patched_after_model
+
+
+
 class CustomState(TypedDict):
     """Custom state"""
-    messages: Annotated[list[AnyMessage], add_messages]
-    customer_id: Optional[int]
+    messages: Annotated[list[AnyMessage], add_messages] #reducer to add messages to state
+    customer_id: Optional[int] 
     username: Optional[str]
     summary: str
 
@@ -50,8 +68,9 @@ class SupervisorState(AgentState):
     customer_id: Optional[int]
     username: Optional[str]
     summary: str | None = None
+    router_choice: Literal["account", "inventory", "general"] | None = None
 
-#handle tool errors w/ custom message
+#handle tool error so it doesn't break the workflow
 @wrap_tool_call
 def handle_tool_errors(request, handler):
     try:
@@ -63,7 +82,6 @@ def handle_tool_errors(request, handler):
         )
 
 def supervisor_node(state: CustomState):
-    # pass messages + top-level state keys the supervisor may need
     customer_id = state.get("customer_id")
     if not customer_id:
         return {"messages": [HumanMessage(content="Please provide your customer ID to continue.")]}
@@ -77,20 +95,11 @@ def supervisor_node(state: CustomState):
         raise RuntimeError("Supervisor returned no final AI message")
     return {"messages": [final_ai]}
 
-# Account agent (non-sensitive tools - read-only)
 account_agent = create_agent(
     model,
     tools=[get_customer_info, edit_customer_info],
     system_prompt=customer_system_prompt,
-    middleware=[
-        ToolRetryMiddleware(
-            max_retries=3,  # Retry up to 3 times
-            backoff_factor=2.0,  # Exponential backoff multiplier
-            initial_delay=1.0,  # Start with 1 second delay
-            max_delay=60.0,  # Cap delays at 60 seconds
-            jitter=True,  # Add random jitter to avoid thundering herd (overloading the server)
-        ),handle_tool_errors,
-    ],
+    middleware=[HumanInTheLoopMiddleware(interrupt_on={"edit_customer_info": True})],
     state_schema=AccountState, #defines what we can read at runtime
 )
 
@@ -99,7 +108,13 @@ inventory_agent = create_agent(
     model,
     tools=[get_albums_by_artist, get_tracks_by_artist, get_info_about_track],
     system_prompt=music_system_prompt,
-    middleware=[handle_tool_errors],
+    middleware=[ToolRetryMiddleware(
+            max_retries=3,  # Retry up to 3 times
+            backoff_factor=2.0,  # Exponential backoff multiplier
+            initial_delay=1.0,  # Start with 1 second delay
+            max_delay=60.0,  # Cap delays at 60 seconds
+            jitter=True,  # Add random jitter to avoid thundering herd (overloading the server)
+        ), handle_tool_errors],
     state_schema=InventoryState,
 )
 
@@ -121,9 +136,12 @@ def call_account_agent_tool(
 ) -> Command:
     cid = runtime.state.get("customer_id")
 
+    #example for passing new data into sub agent (simplified)
+    length = "long" if len(query) > 100 else "short"
     res = account_agent.invoke({
         "messages": [{"role": "user", "content": query}],
-        "customer_id": cid,  # flows into AccountState
+        "customer_id": cid,
+        "length": length,
     })
 
     final_text = res["messages"][-1].content
@@ -141,7 +159,6 @@ def call_inventory_agent_tool(
 ) -> Command:
     res = inventory_agent.invoke({
         "messages": [{"role": "user", "content": query}],
-        # pass customer_id only if your inventory tools/prompts need it
         "customer_id": runtime.state.get("customer_id"),
     })
     final_text = res["messages"][-1].content
@@ -169,9 +186,8 @@ def call_general_agent_tool(
 supervisor = create_agent(
     model,
     tools=[call_account_agent_tool, call_inventory_agent_tool, call_general_agent_tool],           # start with ONLY account tool
-    system_prompt=router_system_prompt,   # reuse your router prompt
+    system_prompt=router_system_prompt,
     state_schema=SupervisorState,
-    middleware=[handle_tool_errors],
 )
 
 
@@ -232,4 +248,4 @@ workflow.add_node("summarize", summarize)
 workflow.add_edge("supervisor", "should_summarize")
 workflow.add_conditional_edges("should_summarize", should_summarize_route, {"summarize": "summarize", END: END})
 workflow.add_edge("summarize", END)
-graph = workflow.compile()
+graph = workflow.compile(checkpointer=memory)

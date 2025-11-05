@@ -1,4 +1,4 @@
-from langchain_core.runnables import Runnable, RunnableConfig
+from langchain_core.runnables import Runnable
 from langchain_core.messages import HumanMessage, AIMessage
 from typing import List, Any
 

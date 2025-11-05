@@ -1,13 +1,13 @@
 # agents/customer_agent.py
 from langchain.tools import tool, ToolRuntime
 from utils.database import db
-from utils.contexts import UserContext, AccountState
+from utils.contexts import AccountState
 from typing import Literal
-editable_parameters = ["name", "email", "phone"]
+editable_parameters = ["Address", "Phone", "Email"]
 
 @tool
-def edit_customer_info(runtime: ToolRuntime[None, AccountState], parameter: Literal["name", "email", "phone"], value: str) -> str:
-    """Update a customer's information - parameter must be one of: name, email, phone"""
+def edit_customer_info(runtime: ToolRuntime[None, AccountState], parameter: Literal["Address", "Phone", "Email"], value: str) -> str:
+    """Update a customer's information - parameter must be one of: Address, Phone, Email"""
     
     if parameter not in editable_parameters:
         return f"The {parameter} parameter is not editable"

@@ -2,16 +2,11 @@
 from dataclasses import dataclass
 from typing import Optional
 from langchain.agents import AgentState
-
-@dataclass
-class UserContext:
-    # Per-run identity the tools can read via runtime.context
-    customer_id: int | None = None
-    username: str | None = None
-
+from typing import Literal
 #defines what we can read at runtime via ToolRuntime
 class AccountState(AgentState):
     customer_id: Optional[int]
+    length: Literal["long", "short"] | None = None
 
 class InventoryState(AgentState):
     customer_id: Optional[int]

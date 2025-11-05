@@ -1,0 +1,9 @@
+1: Example passing through to middlware:
+{
+  "decisions": [
+    {
+      "action_name": "edit_customer_info",
+      "type": "approve"
+    }
+  ]
+}
