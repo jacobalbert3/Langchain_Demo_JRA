@@ -38,6 +38,7 @@ def edit_customer_info(runtime: ToolRuntime[None, AccountState], parameter: Lite
 def get_customer_info(runtime: ToolRuntime[None, AccountState]):
     """Look up customer info (customer_id comes from context)."""
 
+
     customer_id = runtime.state.get("customer_id")
     
     if not customer_id:

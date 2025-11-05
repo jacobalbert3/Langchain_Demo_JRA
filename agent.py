@@ -100,7 +100,15 @@ account_agent = create_agent(
     model,
     tools=[get_customer_info, edit_customer_info],
     system_prompt=customer_system_prompt,
-    middleware=[HumanInTheLoopMiddleware(interrupt_on={"edit_customer_info": True})],
+    middleware=[
+        HumanInTheLoopMiddleware(
+            interrupt_on={"edit_customer_info": True}
+        ), 
+        PIIMiddleware(
+            "email",
+            strategy="mask",
+            apply_to_output=True,  # Enable PII detection on tool outputs for testing
+        )],
     state_schema=AccountState, #defines what we can read at runtime
 )
 
