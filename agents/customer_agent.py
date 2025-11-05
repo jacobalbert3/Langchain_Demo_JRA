@@ -39,6 +39,7 @@ def get_customer_info(runtime: ToolRuntime[UserContext]):
     """Look up customer info (customer_id comes from context)."""
 
     customer_id = runtime.context.customer_id
+    
     if not customer_id:
         raise ValueError("Customer ID not found in context")
     try:

@@ -5,3 +5,4 @@ from dataclasses import dataclass
 class UserContext:
     # Per-run identity the tools can read via runtime.context
     customer_id: int | None = None
+    username: str | None = None

@@ -26,6 +26,8 @@ from langchain_core.runnables import RunnableConfig
 from langsmith import Client
 from langchain_core.messages import RemoveMessage
 from langgraph.checkpoint.sqlite import SqliteSaver
+from langchain.agents.middleware import PIIMiddleware, ToolRetryMiddleware, before_agent
+from langgraph.graph import START
 
 memory = SqliteSaver.from_conn_string(":memory:")
 load_dotenv()
@@ -36,9 +38,19 @@ class CustomState(TypedDict):
     """Custom state"""
     messages: Annotated[list[AnyMessage], add_messages]
     customer_id: Optional[int] #TODO: remove:
+    username: Optional[str]
     router_choice: Optional[str]
     summary: str  # "account"/ "inventory"
 
+
+@before_agent(can_jump_to=["end"])
+def is_logged_in(state: CustomState, runtime):
+    if state.get("customer_id") is None:
+        return {
+            "messages": [AIMessage(content="Please provide your customer ID to continue.")],
+            "jump_to": "end"
+        }
+    return None
 
 #handle tool errors w/ custom message
 @wrap_tool_call
@@ -50,9 +62,6 @@ def handle_tool_errors(request, handler):
             content=f"Tool error!!({str(e)})",
             tool_call_id=request.tool_call["id"]
         )
-
-
-
 
 #========AGENTS========
 
@@ -80,8 +89,18 @@ account_agent = create_agent(
     tools=[get_customer_info],
     context_schema=UserContext,
     system_prompt=customer_system_prompt,
-    middleware=[handle_tool_errors],
+    middleware=[
+        ToolRetryMiddleware(
+            max_retries=3,  # Retry up to 3 times
+            backoff_factor=2.0,  # Exponential backoff multiplier
+            initial_delay=1.0,  # Start with 1 second delay
+            max_delay=60.0,  # Cap delays at 60 seconds
+            jitter=True,  # Add random jitter to avoid thundering herd
+        ),handle_tool_errors,
+    ],
 )
+
+ 
 
 # Account sensitive agent (has edit capabilities)
 account_sensitive_agent = create_agent(
@@ -93,7 +112,7 @@ account_sensitive_agent = create_agent(
         "Use get_customer_info() to show current info. "
         "Use edit_customer_info(parameter, value) to update name, email, or phone when the user requests changes."
     ),
-    middleware=[handle_tool_errors],
+    middleware=[handle_tool_errors, PIIMiddleware("credit_card", strategy="mask")],
 )
 
 # Inventory agent
@@ -116,16 +135,10 @@ general_agent = create_agent(
 
 
 #========NODES========
-def user_node(state: CustomState):
-    if state.get("customer_id") is not None:
-        return {}
-    return {
-        "messages": [AIMessage(content="Please provide your customer ID to continue.")],
-        "customer_id": None,
-    }
 
 def router_node(state: CustomState):
-    
+    if state.get("customer_id") is None:
+        return {"messages": [AIMessage(content="Please provide your customer ID to continue.")], "jump_to": "end"}
     # 1) Call the router agent with the conversation so far
     config = RunnableConfig(tags=["router"], metadata={"customer_id_routed": state.get("customer_id")})
     out = router_agent.invoke({"messages": state["messages"]}, config=config)
@@ -235,7 +248,6 @@ def route_from_router(state: CustomState):
 
 # ---------------- Graph ----------------
 workflow = StateGraph(CustomState)
-workflow.add_node("user", user_node)
 workflow.add_node("router", router_node)
 workflow.add_node("account", account_node)
 workflow.add_node("account_sensitive", account_sensitive_node)
@@ -243,15 +255,13 @@ workflow.add_node("inventory", inventory_node)
 workflow.add_node("general", general_node)
 workflow.add_node("summarize", summarize)
 workflow.add_node("should_summarize", should_summarize_node)
-
-workflow.set_conditional_entry_point(entry_route, {"user": "user", "router": "router"})
-workflow.add_conditional_edges("user", route_from_user, {"router": "router"})
 workflow.add_conditional_edges("router", route_from_router, {
     "account": "account", 
     "account_sensitive": "account_sensitive", 
     "inventory": "inventory", 
     "other": "general"
 })
+workflow.add_edge(START, "router")
 workflow.add_edge("general", "should_summarize")
 workflow.add_edge("account", "should_summarize")
 workflow.add_edge("account_sensitive", "should_summarize")
