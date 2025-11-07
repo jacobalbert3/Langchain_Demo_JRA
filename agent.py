@@ -29,24 +29,7 @@ load_dotenv()
 
 #memory for checkpointer (if not showing through studio)
 memory = SqliteSaver.from_conn_string(":memory:")
-
 ls_client = Client(api_key=os.getenv("LANGCHAIN_API_KEY"))
-
-#For human in loop middleware to work on studio
-_old_after_model = HumanInTheLoopMiddleware.after_model
-
-def _patched_after_model(self, loop_response, runtime, **kwargs):
-    """Allow HITL response to be a raw JSON string"""
-    if isinstance(loop_response, str):
-        try:
-            loop_response = json.loads(loop_response)
-        except Exception:
-            pass
-    return _old_after_model(self, loop_response, runtime, **kwargs)
-
-HumanInTheLoopMiddleware.after_model = _patched_after_model
-
-
 
 #--------STATE DEFINITIONS---------------
 
@@ -62,14 +45,17 @@ class SupervisorState(AgentState):
     customer_id: Optional[int]
     username: Optional[str]
     summary: str | None = None
-    router_choice: Literal["account", "inventory", "general"] | None = None
+    example_string: str | None = None
 
-#example middleware --> handle tool error so it doesn't break the workflow
+class SupervisorContext(BaseModel):
+    example_context: str
+
+#Example middleware --> handle tool error so it doesn't break the workflow!
 @wrap_tool_call
 def handle_tool_errors(request, handler):
     try:
-        return handler(request)
-    except Exception as e:
+        return handler(request) #runs the actual tool call 
+    except Exception as e: #continues the workflow even if the tool call fails
         return ToolMessage(
             content=f"Tool error!!({str(e)})",
             tool_call_id=request.tool_call["id"]
@@ -85,11 +71,18 @@ def supervisor_node(state: CustomState):
         "messages": state["messages"],
         "customer_id": customer_id,
         "username": state.get("username"),
-    })
+        "example_string": "-SUPERVISOR-",
+    }, context=SupervisorContext(example_context="CONTEXT FROM SUPERVISOR AGENT"))
+
     final_ai = _final_ai(out)
     if final_ai is None:
         raise RuntimeError("Supervisor returned no final AI message")
-    return {"messages": [final_ai]}
+    return {"messages": [final_ai]} #adding the final AI message to the state
+
+
+#MIDDLEWARE EXPLANATION!!
+    #Human in the loop: after model becasue it checks the tool call to see if one to interrupt on
+    #PII detection can do before model because its revising the output from the tool call as it goes back into the model
 
 #create account agent
 account_agent = create_agent(
@@ -103,7 +96,8 @@ account_agent = create_agent(
         PIIMiddleware(
             "email",
             strategy="mask",
-            apply_to_output=True,  # Enable PII detection on tool outputs!
+            apply_to_input = False, #CHANGE!
+            apply_to_tool_results=True, #CHANGE!
         )],
     state_schema=AccountState, #defines what we can read at runtime
 )
@@ -119,10 +113,11 @@ inventory_agent = create_agent(
             initial_delay=1.0,  # Start with 1 second delay
             max_delay=60.0,  # Cap delays at 60 seconds
             jitter=True,  # Add random jitter to avoid overloading the server)
-        ), handle_tool_errors],
+        )],
     state_schema=InventoryState,
 )
 
+#general agent for regular inquiries
 general_agent = create_agent(
     model,
     tools=[],  # no tools
@@ -130,32 +125,40 @@ general_agent = create_agent(
     middleware=[handle_tool_errors],
     state_schema=GeneralState,
 )
+
+#TOOL FOR SUPERVISOR -> CALL ACCOUNT AGENT
 @tool(
     "account_agent_tool",
     description="Use for viewing or updating account/profile/order/billing (read & edit: name, email, phone, address, etc)."
 )
-def call_account_agent_tool(
+def call_account_agent_tool( #3 inputs: query of tool call, id of tool call, and state from supervisor agent
     query: str,
     tool_call_id: Annotated[str, InjectedToolCallId],
     runtime: ToolRuntime[None, SupervisorState],
 ) -> Command:
-    cid = runtime.state.get("customer_id")
 
-    #example for passing new data into sub agent (simplified)
-    length = "long" if len(query) > 100 else "short"
+#TOOL RUNTIME ALLOWS YOU TO GET CONTEXT AND STATE
+#GET / PASS STATE
+    cid = runtime.state.get("customer_id")
+    example_string = runtime.state.get("example_string")
+    new_string = example_string + "-ACCOUNT-"
+
     res = account_agent.invoke({
         "messages": [{"role": "user", "content": query}],
         "customer_id": cid,
-        "length": length,
+        "example_string": new_string,
+        "example_context": runtime.context, #GET CONTEXT
     })
 
     final_text = res["messages"][-1].content
+    #UPDATES THE SUPERVISOR AGENT STATE
     return Command(update={
         "messages": [
             ToolMessage(content=final_text, tool_call_id=tool_call_id)
         ]
     })
 
+#for music inventory lookups
 @tool("inventory_agent_tool", description="Use for music inventory lookups: albums, tracks, track details.")
 def call_inventory_agent_tool(
     query: str,
@@ -171,7 +174,7 @@ def call_inventory_agent_tool(
         "messages": [ToolMessage(content=final_text, tool_call_id=tool_call_id)]
     })
 
-
+#for general inquiries
 @tool("general_agent_tool", description="Use for general support questions not about account or inventory.")
 def call_general_agent_tool(
     query: str,
@@ -187,28 +190,33 @@ def call_general_agent_tool(
         "messages": [ToolMessage(content=final_text, tool_call_id=tool_call_id)]
     })
 
+
+#supervisor with custom state and context
 supervisor = create_agent(
     model,
     tools=[call_account_agent_tool, call_inventory_agent_tool, call_general_agent_tool],  #MULTI AGENT DESIGN
     system_prompt=router_system_prompt,
     middleware=[prompt_injection_guard],
     state_schema=SupervisorState,
+    context_schema=SupervisorContext
 )
 
 
-#helper function to get the final AI message from the output
+#input = list of messages
+
 def _final_ai(out: dict) -> AIMessage | None:
-    for m in reversed(out.get("messages", [])):
-        if isinstance(m, AIMessage):
+    for m in reversed(out.get("messages", [])): #reversed to get the last message
+        if isinstance(m, AIMessage): #if the message is an AI message, return it
             return m
-    return None
+    return None #if no AI message, return None
+
 def _last_ai(state: CustomState) -> AIMessage | None:
     for m in reversed(state["messages"]):
         if isinstance(m, AIMessage):
             return m
     return None
 
-
+#node that takes the input from the supervisor agent
 def should_summarize_node(state: CustomState):
     '''Passthrough node - routing decision handled by should_summarize_route'''
     last_ai = _last_ai(state)
@@ -220,7 +228,7 @@ def should_summarize_node(state: CustomState):
 def should_summarize_route(state: CustomState):
     '''Routing function for should_summarize node'''
     messages = state["messages"]
-    if len(messages) > 4:
+    if len(messages) > 15:
         return "summarize"
     return END
 
