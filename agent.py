@@ -45,10 +45,10 @@ class SupervisorState(AgentState):
     customer_id: Optional[int]
     username: Optional[str]
     summary: str | None = None
-    example_string: str | None = None
+    supervisor_state: str | None = None
 
 class SupervisorContext(BaseModel):
-    example_context: str
+    supervisor_context: str
 
 #Example middleware --> handle tool error so it doesn't break the workflow!
 @wrap_tool_call
@@ -71,8 +71,8 @@ def supervisor_node(state: CustomState):
         "messages": state["messages"],
         "customer_id": customer_id,
         "username": state.get("username"),
-        "example_string": "-SUPERVISOR-",
-    }, context=SupervisorContext(example_context="CONTEXT FROM SUPERVISOR AGENT"))
+        "supervisor_state": "-SUPERVISOR-",
+    }, context=SupervisorContext(supervisor_context="CONTEXT FROM SUPERVISOR AGENT"))
 
     final_ai = _final_ai(out)
     if final_ai is None:
@@ -140,14 +140,14 @@ def call_account_agent_tool( #3 inputs: query of tool call, id of tool call, and
 #TOOL RUNTIME ALLOWS YOU TO GET CONTEXT AND STATE
 #GET / PASS STATE
     cid = runtime.state.get("customer_id")
-    example_string = runtime.state.get("example_string")
-    new_string = example_string + "-ACCOUNT-"
+    supervisor_state = runtime.state.get("supervisor_state")
+    account_state = supervisor_state + "-ACCOUNT-"
 
     res = account_agent.invoke({
         "messages": [{"role": "user", "content": query}],
         "customer_id": cid,
-        "example_string": new_string,
-        "example_context": runtime.context, #GET CONTEXT
+        "account_state": account_state,
+        "account_example_context": runtime.context, #GET CONTEXT
     })
 
     final_text = res["messages"][-1].content

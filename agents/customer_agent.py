@@ -6,18 +6,19 @@ from typing import Literal
 editable_parameters = ["Address", "Phone", "Email"]
 
 
-
+#look up past purchases
 @tool
 def past_invoices(runtime: ToolRuntime[None, AccountState]):
     """Look up past invoices for a customer."""
     customer_id = runtime.state.get("customer_id")
     if not customer_id:
         raise ValueError("Customer ID not found in context")
-    try:
+    try: #make sure integer
         customer_id = int(customer_id)
     except (ValueError, TypeError):
         raise ValueError("Customer ID must be a valid integer")
     
+    #NOTE -> this ideally should be ORM (sql injection risk)
     conn = db._engine.raw_connection()
     try:
         cursor = conn.cursor()
@@ -37,7 +38,7 @@ def past_invoices(runtime: ToolRuntime[None, AccountState]):
         rows = cursor.fetchall()
         cols = [d[0] for d in cursor.description]
         cursor.close()
-        return [dict(zip(cols, row)) for row in rows]
+        return [dict(zip(cols, row)) for row in rows] #combines columns and rows into a dictionary
     finally:
         conn.close()
 
@@ -46,7 +47,7 @@ def past_invoices(runtime: ToolRuntime[None, AccountState]):
 def edit_customer_info(runtime: ToolRuntime[None, AccountState], parameter: Literal["Address", "Phone", "Email"], value: str) -> str:
     """Update a customer's information - parameter must be one of: Address, Phone, Email"""
     
-    if parameter not in editable_parameters:
+    if parameter not in editable_parameters: #proxy for how you want to restrict tools use - look more into
         return f"The {parameter} parameter is not editable"
 
     customer_id = runtime.state.get("customer_id")

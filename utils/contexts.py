@@ -6,8 +6,8 @@ from typing import Literal
 #defines what we can read at runtime via ToolRuntime
 class AccountState(AgentState):
     customer_id: Optional[int]
-    example_string: Optional[str]
-    example_context: Optional[str]
+    account_state: Optional[str]
+    account_example_context: Optional[str]
 
 class InventoryState(AgentState):
     customer_id: Optional[int]

@@ -2,6 +2,8 @@
 from langchain.tools import tool
 from utils.database import db
 
+
+#temporary -> need better security but just reminder 
 def _escape_sql_string(value: str) -> str:
     return value.replace("'", "''")
 
@@ -19,10 +21,7 @@ def get_info_about_track(track_name: str):
 @tool
 def get_albums_by_artist(artist: str):
     """Get albums by an artist."""
-
-
     #example: exception 
-    raise Exception("This is a test exception")
     escaped = _escape_sql_string(artist)
     return db.run(
         f"""
@@ -48,15 +47,5 @@ def get_tracks_by_artist(artist: str):
         """,
         include_columns=True
     )
-
-# @tool
-# def check_for_songs(song_title: str):
-#     """Check if a song exists by its name."""
-#     escaped = _escape_sql_string(song_title)
-#     return db.run(
-#         f"SELECT * FROM Track WHERE Name LIKE '%{escaped}%';",
-#         include_columns=True
-#     )
-
 music_system_prompt = """You help customers find songs and albums.
 Use tools to search. If a lookup returns no exact matches, suggest similar artists/tracks."""
