@@ -1,2 +1,3 @@
 FRICTION LOG
 
+test
